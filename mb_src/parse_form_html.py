@@ -25,6 +25,20 @@ class GenericFormParser:
         match = re.search(amount_pattern, text)
         return match.group(0) if match else ""
     
+    def extract_table_context(self, table):
+        """Extract text that appears before the table to provide context"""
+        context = []
+        prev_element = table.find_previous_sibling()
+        
+        # Look for text elements before the table
+        while prev_element and prev_element.name in ['p', 'div', 'li']:
+            text = prev_element.get_text().strip()
+            if text and not text.startswith('□'):  # Skip checkbox markers
+                context.append(text)
+            prev_element = prev_element.find_previous_sibling()
+        
+        return ' '.join(reversed(context))  # Return context in original order
+    
     def process_element(self, element):
         """Process a single HTML element and extract its data"""
         data = {}
@@ -86,7 +100,11 @@ class GenericFormParser:
     
     def process_table(self, table):
         """Process a table and maintain its structure"""
-        table_data = []
+        table_data = {
+            'context': self.extract_table_context(table),
+            'headers': [],
+            'rows': []
+        }
         
         # Get headers
         headers = table.find_all('th')
@@ -94,49 +112,39 @@ class GenericFormParser:
             headers = table.find('tr').find_all('td')
         
         header_texts = [h.get_text().strip() for h in headers]
+        table_data['headers'] = header_texts
         
         # Process rows
         rows = table.find_all('tr')[1:] if headers else table.find_all('tr')
         for row in rows:
-            row_data = {'type': 'row', 'cells': []}
+            row_data = {'cells': []}
             cells = row.find_all('td')
             
             for i, cell in enumerate(cells):
-                cell_data = self.process_element(cell)
-                if cell_data:
-                    if i < len(header_texts):
-                        cell_data['header'] = header_texts[i]
+                cell_text = cell.get_text().strip()
+                if cell_text:  # Only add non-empty cells
+                    cell_data = {
+                        'value': cell_text,
+                        'header': header_texts[i] if i < len(header_texts) else None
+                    }
                     row_data['cells'].append(cell_data)
             
             if row_data['cells']:
-                table_data.append(row_data)
+                table_data['rows'].append(row_data)
         
         return table_data
     
     def parse_html(self, html_file):
-        """Parse HTML file and extract all form data while maintaining structure"""
+        """Parse HTML file and extract table data with context"""
         # Read HTML file
         with open(html_file, 'r', encoding='utf-8') as f:
             soup = BeautifulSoup(f.read(), 'html.parser')
         
-        # Process all elements in order
-        for element in soup.find_all(['li', 'td', 'th', 'p', 'div']):
-            # Skip elements that are part of a table (they'll be processed by process_table)
-            if element.parent.name == 'table':
-                continue
-                
-            data = self.process_element(element)
-            if data:
-                self.form_data.append(data)
-        
         # Process tables
         for table in soup.find_all('table'):
             table_data = self.process_table(table)
-            if table_data:
-                self.form_data.append({
-                    'type': 'table',
-                    'rows': table_data
-                })
+            if table_data['rows']:  # Only add tables with data
+                self.form_data.append(table_data)
         
         return self.form_data
 
@@ -163,8 +171,11 @@ def main():
         print(f"\nSuccess! Data written to {output_file}")
         
         # Print sample of extracted data
-        print("\nSample of extracted data:")
-        print(json.dumps(result[:5], indent=2))  # Show first 5 elements
+        print("\nExtracted tables:")
+        for table in result:
+            print(f"\nContext: {table['context']}")
+            print("Headers:", table['headers'])
+            print("First row:", table['rows'][0] if table['rows'] else "No rows")
     else:
         print("\nFailed to parse form data")
 
