@@ -5,7 +5,7 @@ import re
 
 class GenericFormParser:
     def __init__(self):
-        self.form_data = {}
+        self.form_data = []
     
     def extract_field_value(self, text):
         """Extract value from field text like 'Field name: value'"""
@@ -25,81 +25,118 @@ class GenericFormParser:
         match = re.search(amount_pattern, text)
         return match.group(0) if match else ""
     
-    def parse_text_fields(self, soup):
-        """Parse all text fields from list items"""
-        text_fields = {}
-        for item in soup.find_all('li'):
-            text = item.get_text().strip()
+    def process_element(self, element):
+        """Process a single HTML element and extract its data"""
+        data = {}
+        text = element.get_text().strip()
+        
+        # Skip empty elements
+        if not text:
+            return None
+            
+        # Process list items
+        if element.name == 'li':
             if ':' in text:
                 field_name = text.split(':', 1)[0].strip()
                 value = self.extract_field_value(text)
-                if value:  # Only add non-empty values
-                    text_fields[field_name] = value
-        return text_fields
+                if value:
+                    data['type'] = 'field'
+                    data['name'] = field_name
+                    data['value'] = value
+                    return data
+        
+        # Process table cells
+        elif element.name in ['td', 'th']:
+            # Check if this is a header cell
+            if element.name == 'th' or element.parent.name == 'tr' and element.parent.find('th'):
+                data['type'] = 'header'
+                data['value'] = text
+            else:
+                data['type'] = 'cell'
+                data['value'] = text
+            return data
+        
+        # Process text nodes
+        else:
+            # Look for SSNs
+            ssn = self.extract_ssn(text)
+            if ssn:
+                data['type'] = 'ssn'
+                data['value'] = ssn
+                return data
+            
+            # Look for amounts
+            amount = self.extract_amount(text)
+            if amount:
+                data['type'] = 'amount'
+                data['value'] = amount
+                return data
+            
+            # If it's just text with a colon, treat it as a field
+            if ':' in text:
+                field_name = text.split(':', 1)[0].strip()
+                value = self.extract_field_value(text)
+                if value:
+                    data['type'] = 'field'
+                    data['name'] = field_name
+                    data['value'] = value
+                    return data
+        
+        return None
     
-    def parse_tables(self, soup):
-        """Parse all tables in the document"""
-        tables_data = []
-        for table in soup.find_all('table'):
-            table_data = {
-                'headers': [],
-                'rows': []
-            }
-            
-            # Get headers
-            headers = table.find_all('th')
-            if not headers:
-                headers = table.find('tr').find_all('td')  # Use first row as headers if no th elements
-            
-            for header in headers:
-                table_data['headers'].append(header.get_text().strip())
-            
-            # Get rows
-            rows = table.find_all('tr')[1:] if headers else table.find_all('tr')  # Skip header row if headers exist
-            for row in rows:
-                row_data = {}
-                cells = row.find_all('td')
-                for i, cell in enumerate(cells):
-                    if i < len(table_data['headers']):
-                        row_data[table_data['headers'][i]] = cell.get_text().strip()
-                if row_data:  # Only add non-empty rows
-                    table_data['rows'].append(row_data)
-            
-            if table_data['rows']:  # Only add tables with data
-                tables_data.append(table_data)
+    def process_table(self, table):
+        """Process a table and maintain its structure"""
+        table_data = []
         
-        return tables_data
-    
-    def parse_special_fields(self, soup):
-        """Parse special fields like SSNs and amounts"""
-        special_fields = {
-            'ssns': [],
-            'amounts': []
-        }
+        # Get headers
+        headers = table.find_all('th')
+        if not headers:
+            headers = table.find('tr').find_all('td')
         
-        # Find all SSNs
-        full_text = soup.get_text()
-        ssns = re.finditer(r'\d{3}-\d{2}-\d{4}', full_text)
-        special_fields['ssns'] = [ssn.group(0) for ssn in ssns]
+        header_texts = [h.get_text().strip() for h in headers]
         
-        # Find all amounts
-        amounts = re.finditer(r'\$?\d{1,3}(?:,\d{3})*(?:\.\d+)?', full_text)
-        special_fields['amounts'] = [amount.group(0) for amount in amounts]
+        # Process rows
+        rows = table.find_all('tr')[1:] if headers else table.find_all('tr')
+        for row in rows:
+            row_data = {'type': 'row', 'cells': []}
+            cells = row.find_all('td')
+            
+            for i, cell in enumerate(cells):
+                cell_data = self.process_element(cell)
+                if cell_data:
+                    if i < len(header_texts):
+                        cell_data['header'] = header_texts[i]
+                    row_data['cells'].append(cell_data)
+            
+            if row_data['cells']:
+                table_data.append(row_data)
         
-        return special_fields
+        return table_data
     
     def parse_html(self, html_file):
-        """Parse HTML file and extract all form data"""
+        """Parse HTML file and extract all form data while maintaining structure"""
         # Read HTML file
         with open(html_file, 'r', encoding='utf-8') as f:
             soup = BeautifulSoup(f.read(), 'html.parser')
         
-        # Parse different types of data
-        self.form_data = {
-            'text_fields': self.parse_text_fields(soup),
-            'tables': self.parse_tables(soup),
-            'special_fields': self.parse_special_fields(soup)
-        }
+        # Process all elements in order
+        for element in soup.find_all(['li', 'td', 'th', 'p', 'div']):
+            # Skip elements that are part of a table (they'll be processed by process_table)
+            if element.parent.name == 'table':
+                continue
+                
+            data = self.process_element(element)
+            if data:
+                self.form_data.append(data)
+        
+        # Process tables
+        for table in soup.find_all('table'):
+            table_data = self.process_table(table)
+            if table_data:
+                self.form_data.append({
+                    'type': 'table',
+                    'rows': table_data
+                })
         
         return self.form_data
 
@@ -124,21 +161,10 @@ def main():
             json.dump(result, f, indent=2, ensure_ascii=False)
         
         print(f"\nSuccess! Data written to {output_file}")
-        print("\nExtracted sections:")
-        for section in result.keys():
-            print(f"- {section}")
         
         # Print sample of extracted data
         print("\nSample of extracted data:")
-        if "text_fields" in result:
-            print("\nText Fields:")
-            print(json.dumps(result["text_fields"], indent=2))
-        if "tables" in result:
-            print("\nTables:")
-            print(json.dumps(result["tables"], indent=2))
-        if "special_fields" in result:
-            print("\nSpecial Fields:")
-            print(json.dumps(result["special_fields"], indent=2))
+        print(json.dumps(result[:5], indent=2))  # Show first 5 elements
     else:
         print("\nFailed to parse form data")
 
