@@ -6,6 +6,7 @@ import re
 class GenericFormParser:
     def __init__(self):
         self.form_data = []
+        self.current_section = None
     
     def extract_field_value(self, text):
         """Extract value from field text like 'Field name: value'"""
@@ -29,8 +30,13 @@ class GenericFormParser:
         """Extract section title (like 'Part II') from text"""
         text = element.get_text().strip()
         if text.startswith('Part '):
-            return text
-        return None
+            # Extract just the part number and title
+            match = re.match(r'Part\s+([IVX]+)(?:\s+[-–]\s+)?(.+)?', text)
+            if match:
+                part_num = match.group(1)
+                part_title = match.group(2) if match.group(2) else ""
+                return f"Part {part_num}", part_title
+        return None, None
     
     def extract_table_context(self, table):
         """Extract text that appears before the table to provide context"""
@@ -54,15 +60,24 @@ class GenericFormParser:
         text = element.get_text().strip()
         
         # Look for numbered fields (e.g., "2. Add the amounts...")
-        field_match = re.match(r'^\d+\.?\s+(.+)', text)
+        field_match = re.match(r'^(\d+)\.?\s+(.+)', text)
         if field_match:
-            field_text = field_match.group(1).strip()
+            field_num = field_match.group(1)
+            field_text = field_match.group(2).strip()
+            
             # Look for amount after the field text
             amount_match = re.search(r'\d{1,3}(?:,\d{3})*(?:\.\d+)?$', text)
+            
+            # Look for any note or additional text
+            note_match = re.search(r'\(([^)]+)\)', field_text)
+            note = note_match.group(1) if note_match else None
+            
             return {
                 'type': 'form_field',
+                'number': field_num,
                 'text': field_text,
-                'value': amount_match.group(0) if amount_match else None
+                'value': amount_match.group(0) if amount_match else None,
+                'note': note
             }
         return None
     
@@ -112,14 +127,21 @@ class GenericFormParser:
         current_section = None
         current_section_data = None
         
-        # Process all elements in order
-        for element in soup.find_all(['p', 'div', 'table', 'li']):
+        # First pass: collect all elements and their text
+        elements = []
+        for element in soup.find_all(['p', 'div', 'table', 'li', 'span']):
+            text = element.get_text().strip()
+            if text:
+                elements.append(element)
+        
+        # Second pass: process elements with context
+        for i, element in enumerate(elements):
             # Skip empty elements
             if not element.get_text().strip():
                 continue
             
             # Check for section titles (Part I, Part II, etc.)
-            section_title = self.extract_section_title(element)
+            section_title, section_subtitle = self.extract_section_title(element)
             if section_title:
                 if current_section_data:
                     self.form_data.append(current_section_data)
@@ -127,6 +149,7 @@ class GenericFormParser:
                 current_section_data = {
                     'type': 'section',
                     'title': section_title,
+                    'subtitle': section_subtitle,
                     'fields': []
                 }
                 continue
@@ -182,11 +205,18 @@ def main():
         for item in result:
             if item.get('type') == 'section':
                 print(f"\nSection: {item['title']}")
+                if item.get('subtitle'):
+                    print(f"Subtitle: {item['subtitle']}")
                 print("Fields:", len(item['fields']))
+                for field in item['fields']:
+                    if field.get('type') == 'form_field':
+                        print(f"  Field {field.get('number')}: {field.get('text')}")
+                        if field.get('value'):
+                            print(f"    Value: {field.get('value')}")
             elif item.get('type') == 'form_field':
-                print(f"\nField: {item['text']}")
+                print(f"\nField {item.get('number')}: {item.get('text')}")
                 if item.get('value'):
-                    print(f"Value: {item['value']}")
+                    print(f"Value: {item.get('value')}")
             elif item.get('type') == 'table':
                 print(f"\nTable with {len(item['rows'])} rows")
                 print("Context:", item['context'])
