@@ -32,6 +32,23 @@ class GenericFormParser:
             return text
         return None
     
+    def extract_table_context(self, table):
+        """Extract text that appears before the table to provide context"""
+        context = []
+        prev_element = table.find_previous_sibling()
+        
+        # Look for text elements before the table
+        while prev_element and len(context) < 3:  # Limit to 3 previous elements for relevant context
+            if prev_element.name in ['p', 'div', 'li']:
+                text = prev_element.get_text().strip()
+                if text and not text.startswith('□'):  # Skip checkbox markers
+                    # Skip if text is just a number or empty
+                    if not re.match(r'^\d+\.?\s*$', text):
+                        context.append(text)
+            prev_element = prev_element.find_previous_sibling()
+        
+        return ' '.join(reversed(context))  # Return context in original order
+    
     def process_form_field(self, element):
         """Process a form field (numbered items like '2. Add the amounts...')"""
         text = element.get_text().strip()
@@ -172,6 +189,7 @@ def main():
                     print(f"Value: {item['value']}")
             elif item.get('type') == 'table':
                 print(f"\nTable with {len(item['rows'])} rows")
+                print("Context:", item['context'])
     else:
         print("\nFailed to parse form data")
 
