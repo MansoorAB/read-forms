@@ -25,82 +25,34 @@ class GenericFormParser:
         match = re.search(amount_pattern, text)
         return match.group(0) if match else ""
     
-    def extract_table_context(self, table):
-        """Extract text that appears before the table to provide context"""
-        context = []
-        prev_element = table.find_previous_sibling()
-        
-        # Look for text elements before the table
-        while prev_element and prev_element.name in ['p', 'div', 'li']:
-            text = prev_element.get_text().strip()
-            if text and not text.startswith('□'):  # Skip checkbox markers
-                context.append(text)
-            prev_element = prev_element.find_previous_sibling()
-        
-        return ' '.join(reversed(context))  # Return context in original order
+    def extract_section_title(self, element):
+        """Extract section title (like 'Part II') from text"""
+        text = element.get_text().strip()
+        if text.startswith('Part '):
+            return text
+        return None
     
-    def process_element(self, element):
-        """Process a single HTML element and extract its data"""
-        data = {}
+    def process_form_field(self, element):
+        """Process a form field (numbered items like '2. Add the amounts...')"""
         text = element.get_text().strip()
         
-        # Skip empty elements
-        if not text:
-            return None
-            
-        # Process list items
-        if element.name == 'li':
-            if ':' in text:
-                field_name = text.split(':', 1)[0].strip()
-                value = self.extract_field_value(text)
-                if value:
-                    data['type'] = 'field'
-                    data['name'] = field_name
-                    data['value'] = value
-                    return data
-        
-        # Process table cells
-        elif element.name in ['td', 'th']:
-            # Check if this is a header cell
-            if element.name == 'th' or element.parent.name == 'tr' and element.parent.find('th'):
-                data['type'] = 'header'
-                data['value'] = text
-            else:
-                data['type'] = 'cell'
-                data['value'] = text
-            return data
-        
-        # Process text nodes
-        else:
-            # Look for SSNs
-            ssn = self.extract_ssn(text)
-            if ssn:
-                data['type'] = 'ssn'
-                data['value'] = ssn
-                return data
-            
-            # Look for amounts
-            amount = self.extract_amount(text)
-            if amount:
-                data['type'] = 'amount'
-                data['value'] = amount
-                return data
-            
-            # If it's just text with a colon, treat it as a field
-            if ':' in text:
-                field_name = text.split(':', 1)[0].strip()
-                value = self.extract_field_value(text)
-                if value:
-                    data['type'] = 'field'
-                    data['name'] = field_name
-                    data['value'] = value
-                    return data
-        
+        # Look for numbered fields (e.g., "2. Add the amounts...")
+        field_match = re.match(r'^\d+\.?\s+(.+)', text)
+        if field_match:
+            field_text = field_match.group(1).strip()
+            # Look for amount after the field text
+            amount_match = re.search(r'\d{1,3}(?:,\d{3})*(?:\.\d+)?$', text)
+            return {
+                'type': 'form_field',
+                'text': field_text,
+                'value': amount_match.group(0) if amount_match else None
+            }
         return None
     
     def process_table(self, table):
         """Process a table and maintain its structure"""
         table_data = {
+            'type': 'table',
             'context': self.extract_table_context(table),
             'headers': [],
             'rows': []
@@ -135,16 +87,54 @@ class GenericFormParser:
         return table_data
     
     def parse_html(self, html_file):
-        """Parse HTML file and extract table data with context"""
+        """Parse HTML file and extract all form data including fields and sections"""
         # Read HTML file
         with open(html_file, 'r', encoding='utf-8') as f:
             soup = BeautifulSoup(f.read(), 'html.parser')
         
-        # Process tables
-        for table in soup.find_all('table'):
-            table_data = self.process_table(table)
-            if table_data['rows']:  # Only add tables with data
-                self.form_data.append(table_data)
+        current_section = None
+        current_section_data = None
+        
+        # Process all elements in order
+        for element in soup.find_all(['p', 'div', 'table', 'li']):
+            # Skip empty elements
+            if not element.get_text().strip():
+                continue
+            
+            # Check for section titles (Part I, Part II, etc.)
+            section_title = self.extract_section_title(element)
+            if section_title:
+                if current_section_data:
+                    self.form_data.append(current_section_data)
+                current_section = section_title
+                current_section_data = {
+                    'type': 'section',
+                    'title': section_title,
+                    'fields': []
+                }
+                continue
+            
+            # Process tables
+            if element.name == 'table':
+                table_data = self.process_table(element)
+                if table_data['rows']:
+                    if current_section_data:
+                        current_section_data['fields'].append(table_data)
+                    else:
+                        self.form_data.append(table_data)
+                continue
+            
+            # Process form fields
+            field_data = self.process_form_field(element)
+            if field_data:
+                if current_section_data:
+                    current_section_data['fields'].append(field_data)
+                else:
+                    self.form_data.append(field_data)
+        
+        # Add the last section if exists
+        if current_section_data:
+            self.form_data.append(current_section_data)
         
         return self.form_data
 
@@ -171,11 +161,17 @@ def main():
         print(f"\nSuccess! Data written to {output_file}")
         
         # Print sample of extracted data
-        print("\nExtracted tables:")
-        for table in result:
-            print(f"\nContext: {table['context']}")
-            print("Headers:", table['headers'])
-            print("First row:", table['rows'][0] if table['rows'] else "No rows")
+        print("\nExtracted data:")
+        for item in result:
+            if item.get('type') == 'section':
+                print(f"\nSection: {item['title']}")
+                print("Fields:", len(item['fields']))
+            elif item.get('type') == 'form_field':
+                print(f"\nField: {item['text']}")
+                if item.get('value'):
+                    print(f"Value: {item['value']}")
+            elif item.get('type') == 'table':
+                print(f"\nTable with {len(item['rows'])} rows")
     else:
         print("\nFailed to parse form data")
 
