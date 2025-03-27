@@ -7,7 +7,13 @@ class GenericFormParser:
     def __init__(self):
         self.form_data = []
         self.current_section = None
+        self.debug = True  # Enable debug logging
     
+    def log(self, message):
+        """Debug logging"""
+        if self.debug:
+            print(f"DEBUG: {message}")
+
     def extract_field_value(self, text):
         """Extract value from field text like 'Field name: value'"""
         if ':' in text:
@@ -29,12 +35,13 @@ class GenericFormParser:
     def extract_section_title(self, element):
         """Extract section title (like 'Part II') from text"""
         text = element.get_text().strip()
-        if text.startswith('Part '):
+        if 'Part' in text:
             # Extract just the part number and title
-            match = re.match(r'Part\s+([IVX]+)(?:\s+[-–]\s+)?(.+)?', text)
+            match = re.match(r'.*Part\s+([IVX]+)(?:\s*[-–]?\s*)?(.+)?', text)
             if match:
                 part_num = match.group(1)
-                part_title = match.group(2) if match.group(2) else ""
+                part_title = match.group(2).strip() if match.group(2) else ""
+                self.log(f"Found section: Part {part_num} - {part_title}")
                 return f"Part {part_num}", part_title
         return None, None
     
@@ -43,17 +50,15 @@ class GenericFormParser:
         context = []
         prev_element = table.find_previous_sibling()
         
-        # Look for text elements before the table
-        while prev_element and len(context) < 3:  # Limit to 3 previous elements for relevant context
+        while prev_element and len(context) < 3:
             if prev_element.name in ['p', 'div', 'li']:
                 text = prev_element.get_text().strip()
-                if text and not text.startswith('□'):  # Skip checkbox markers
-                    # Skip if text is just a number or empty
+                if text and not text.startswith('□'):
                     if not re.match(r'^\d+\.?\s*$', text):
                         context.append(text)
             prev_element = prev_element.find_previous_sibling()
         
-        return ' '.join(reversed(context))  # Return context in original order
+        return ' '.join(reversed(context))
     
     def process_form_field(self, element):
         """Process a form field (numbered items like '2. Add the amounts...')"""
@@ -72,6 +77,10 @@ class GenericFormParser:
             note_match = re.search(r'\(([^)]+)\)', field_text)
             note = note_match.group(1) if note_match else None
             
+            self.log(f"Found field {field_num}: {field_text}")
+            if amount_match:
+                self.log(f"  with amount: {amount_match.group(0)}")
+            
             return {
                 'type': 'form_field',
                 'number': field_num,
@@ -79,6 +88,26 @@ class GenericFormParser:
                 'value': amount_match.group(0) if amount_match else None,
                 'note': note
             }
+        
+        # Try alternative field detection for fields that might not start with numbers
+        if ':' in text:
+            parts = text.split(':', 1)
+            field_text = parts[0].strip()
+            value = parts[1].strip() if len(parts) > 1 else None
+            
+            # Check if the field text starts with a number
+            num_match = re.match(r'^(\d+)\.?\s+(.+)', field_text)
+            if num_match:
+                field_num = num_match.group(1)
+                field_text = num_match.group(2).strip()
+                self.log(f"Found alternative field {field_num}: {field_text}")
+                return {
+                    'type': 'form_field',
+                    'number': field_num,
+                    'text': field_text,
+                    'value': value
+                }
+        
         return None
     
     def process_table(self, table):
@@ -133,17 +162,26 @@ class GenericFormParser:
             text = element.get_text().strip()
             if text:
                 elements.append(element)
+                self.log(f"Found element: {text[:100]}...")
+        
+        # Initialize default Part I if no sections found
+        current_section_data = {
+            'type': 'section',
+            'title': 'Part I',
+            'subtitle': '',
+            'fields': []
+        }
         
         # Second pass: process elements with context
         for i, element in enumerate(elements):
-            # Skip empty elements
-            if not element.get_text().strip():
+            text = element.get_text().strip()
+            if not text:
                 continue
             
             # Check for section titles (Part I, Part II, etc.)
             section_title, section_subtitle = self.extract_section_title(element)
             if section_title:
-                if current_section_data:
+                if current_section_data and (current_section_data['fields'] or current_section_data['title'] != 'Part I'):
                     self.form_data.append(current_section_data)
                 current_section = section_title
                 current_section_data = {
@@ -158,22 +196,16 @@ class GenericFormParser:
             if element.name == 'table':
                 table_data = self.process_table(element)
                 if table_data['rows']:
-                    if current_section_data:
-                        current_section_data['fields'].append(table_data)
-                    else:
-                        self.form_data.append(table_data)
+                    current_section_data['fields'].append(table_data)
                 continue
             
             # Process form fields
             field_data = self.process_form_field(element)
             if field_data:
-                if current_section_data:
-                    current_section_data['fields'].append(field_data)
-                else:
-                    self.form_data.append(field_data)
+                current_section_data['fields'].append(field_data)
         
         # Add the last section if exists
-        if current_section_data:
+        if current_section_data and (current_section_data['fields'] or current_section_data['title'] != 'Part I'):
             self.form_data.append(current_section_data)
         
         return self.form_data
